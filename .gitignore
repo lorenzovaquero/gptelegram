@@ -127,3 +127,13 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Keys and tokens
+keys/
+
+# Logging info
+logs/
+chats/
+
+# Experimental stuff
+other_prompts/
