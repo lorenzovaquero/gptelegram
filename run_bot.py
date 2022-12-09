@@ -84,7 +84,7 @@ def create_chat_folder(effective_chat):
         pkl_file = os.path.join(chat_folder, CHAT_PKL)
         
         with open(pkl_file, "wb") as chat_file:
-            pickle.dump({'metadata': {}, 'chat': []}, chat_file, protocol=pickle.HIGHEST_PROTOCOL)  # TODO: effective_chat.to_dict() at the metadata field?
+            pickle.dump({'metadata': effective_chat.to_dict(), 'chat': []}, chat_file, protocol=pickle.HIGHEST_PROTOCOL)  # TODO: effective_chat.to_dict() at the metadata field?
     
     return chat_folder
 
@@ -222,11 +222,9 @@ def get_openai_answer(msg_text, text_engine=DEFAULT_TEXT_ENGINE, human_name=DEFA
     return answ
 
 
-def talk_to_openai(update, store_conv=False, prompt_text=DEFAULT_PROMPT, human_name=DEFAULT_HUMAN, bot_name=DEFAULT_BOT):
+def talk_to_openai(message, update, store_conv=False, prompt_text=DEFAULT_PROMPT, human_name=DEFAULT_HUMAN, bot_name=DEFAULT_BOT):
     user = update.message.from_user
     chat_id = update.effective_chat.id
-    
-    msg = clean_query(update.message.text)
 	
     if store_conv:
         # We create (or get) file with chat_id conversation
@@ -236,17 +234,17 @@ def talk_to_openai(update, store_conv=False, prompt_text=DEFAULT_PROMPT, human_n
         conv_context_data = load_interaction(chat_folder=chat_folder)
     
         # Store question in file
-        save_interaction(chat_folder=chat_folder, user_name=human_name, msg_text=msg)
+        save_interaction(chat_folder=chat_folder, user_name=human_name, msg_text=message)
         
         context_txt = assemble_context(chat_data=conv_context_data)
     
     else:
-        conv_context = None
+        context_txt = None
     
     prompt = assemble_prompt(prompt_text=prompt_text, human_name=human_name,
 	                         bot_name=bot_name, context=context_txt)
 	
-    openai_query = assemble_openai_query(prompt=prompt, query=msg)
+    openai_query = assemble_openai_query(prompt=prompt, query=message)
     
     answ = get_openai_answer(openai_query, human_name=human_name, bot_name=bot_name)
     
@@ -267,7 +265,15 @@ def bot_pic_handler(update, context):
     if human_name is None:
         human_name = DEFAULT_HUMAN
     
-    answ = talk_to_openai(update, store_conv=STORE_CONV, prompt_text=CURRENT_PROMPT, human_name=human_name, bot_name=DEFAULT_BOT)
+    user = update.message.from_user
+    chat_id = update.effective_chat.id
+    chat_name = update.effective_chat.title if hasattr(update.effective_chat, 'title') else None
+    
+    msg = clean_query(update.message.text)
+    
+    logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) sends \\PIC ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, message_id=update.message.message_id, user_msg=msg))
+    
+    answ = talk_to_openai(message=msg, update=update, store_conv=STORE_CONV, prompt_text=CURRENT_PROMPT, human_name=human_name, bot_name=DEFAULT_BOT)
 	
     context.bot.send_message(chat_id=update.effective_chat.id, text="Let me think...")
     
@@ -278,6 +284,8 @@ def bot_pic_handler(update, context):
     answ = answ.strip()
     
     latest_file = generate_image(prompt_text=answ)
+    
+    logger.info('Chat {chat_id} ({chat_name}) - BOT ({bot_name}) answers \\PIC ({message_id}): "{bot_answ}"'.format(chat_name=chat_name, chat_id=chat_id, bot_name=DEFAULT_BOT, message_id=update.message.message_id, bot_answ=answ))
     
     context.bot.send_photo(chat_id=update.effective_chat.id,
                            photo=open(latest_file, 'rb'),
@@ -294,8 +302,15 @@ def bot_ai_handler(update, context):
     
     user = update.message.from_user
     chat_id = update.effective_chat.id
+    chat_name = update.effective_chat.title if hasattr(update.effective_chat, 'title') else None
     
-    answ = talk_to_openai(update, store_conv=STORE_CONV, prompt_text=CURRENT_PROMPT, human_name=human_name, bot_name=DEFAULT_BOT)
+    msg = clean_query(update.message.text)
+    
+    logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) sends \\AI ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, message_id=update.message.message_id, user_msg=msg))
+    
+    answ = talk_to_openai(message=msg, update=update, store_conv=STORE_CONV, prompt_text=CURRENT_PROMPT, human_name=human_name, bot_name=DEFAULT_BOT)
+    
+    logger.info('Chat {chat_id} ({chat_name}) - BOT ({bot_name}) answers \\AI ({message_id}): "{bot_answ}"'.format(chat_name=chat_name, chat_id=chat_id, bot_name=DEFAULT_BOT, message_id=update.message.message_id, bot_answ=answ))
 	
     context.bot.send_message(chat_id=chat_id, text=answ)
 
@@ -308,8 +323,11 @@ def bot_TEXT_handler(update, context):
     
     user = update.message.from_user
     chat_id = update.effective_chat.id
+    chat_name = update.effective_chat.title if hasattr(update.effective_chat, 'title') else None
     
     msg = clean_query(update.message.text)
+    
+    logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) sends TEXT ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, message_id=update.message.message_id, user_msg=msg))
 	
     if STORE_CONV:
         # We create (or get) file with chat_id conversation
@@ -319,8 +337,37 @@ def bot_TEXT_handler(update, context):
         save_interaction(chat_folder=chat_folder, user_name=human_name, msg_text=msg)
 
 
-def bot_ERROR_handler(update, context, error):
-    logger.warn('Update "%s" caused error "%s"' % (update, error))
+def bot_ERROR_handler(update, context):
+    if hasattr(update, 'message') and hasattr(update.message, 'text'):
+        message_text = update.message.text
+    else:
+        message_text = None
+        
+    if hasattr(update, 'message') and hasattr(update.message, 'chat_id'):
+        chat_id = update.message.chat_id
+    else:
+        chat_id = None
+    
+    if hasattr(update, 'message') and hasattr(update.message, 'message_id'):
+        message_id = update.message.message_id
+    else:
+        message_id = None
+    
+    if hasattr(update, 'effective_chat') and hasattr(update.effective_chat, 'title'):
+        chat_name = update.effective_chat.title
+    else:
+        chat_name = None
+    
+    if hasattr(update, 'message') and hasattr(update.message, 'from_user'):
+        user_id = update.message.from_user.id
+        user_name = get_human_name(from_user=update.message.from_user)
+    else:
+        user_id = None
+        user_name = None
+    
+    
+    logger.warning('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) with message ({message_id}) "{user_msg}" caused error "{error_txt}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user_id, user_name=user_name, message_id=message_id, user_msg=message_text, error_txt=context.error))
+    raise context.error
 
 
 def _read_prompt_file(file_name):
