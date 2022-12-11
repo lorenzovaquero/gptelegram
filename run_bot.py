@@ -13,12 +13,14 @@ bot.
 """
 
 import argparse
+import yaml
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 import logging, os, random, sys, datetime, glob
 from dateutil.relativedelta import relativedelta
 import openai
 import subprocess
 import pickle
+import shutil
 
 CURRENT_DIR = os.path.dirname(__file__)
 
@@ -35,7 +37,7 @@ MAX_CONTEXT_MESSAGES = 6
 STABLE_DIFFUSION_PATH = ""
 
 DEFAULT_HUMAN = "Lorenzo"
-DEFAULT_BOT = "Danibot"
+DEFAULT_BOT = "Dabotni"
 
 DEFAULT_PROMPT = """The following is a conversation between {bot} and his friend {human}. {bot} always does what {human} tells him to do."""
 
@@ -46,6 +48,7 @@ PROMPT_LINK = """
 {bot}:"""
 
 CURRENT_PROMPT = None
+CHAT_WHITELIST = None
 
 
 # Enable logging
@@ -61,6 +64,59 @@ class SafeDict(dict):  # To not replace stuff if it's not available
         return '{' + key + '}'
 
 
+def whitelist_filter(func):
+    def inner(*args, **kwargs):
+        update = kwargs.get('update', None)
+        context = kwargs.get('context', None)
+        
+        if update is None or context is None:
+            return
+        
+        interaction_allowed = check_interaction_allowed(whitelist=CHAT_WHITELIST, update=update)
+        
+        human_name = get_human_name(from_user=update.message.from_user)
+        if human_name is None:
+            human_name = DEFAULT_HUMAN
+        
+        user = update.message.from_user
+        chat_id = update.effective_chat.id
+        chat_name = update.effective_chat.title if hasattr(update.effective_chat, 'title') else None
+        
+        if not interaction_allowed:
+            if STRICT_WHITE_LIST:  # If the white-list is strict, we reply with an error and return
+                
+                logger.warning('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) has been strictly whitelisted. Sends ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, message_id=update.message.message_id, user_msg=msg))
+                context.bot.send_message(chat_id=chat_id, text="An error has occured. Please try again later.\nIf the problem persists, please [contact support](https://latlmes.com/chatbot/help).", disable_web_page_preview=True, parse_mode='MarkdownV2')
+                return
+            
+            else:
+                  # If the white-list is strict, we reply with the default and safe PROMPT
+                  logger.warning('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) has been shadow whitelisted.'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name))
+                  
+                  return func(*args, **kwargs, prompt_text=DEFAULT_PROMPT)
+            
+        else:
+            return func(*args, **kwargs, prompt_text=CURRENT_PROMPT)  # If the user is whitelisted, we load the "CURRENT_PROMPT", a.k.a. the prompt in the file
+    
+    return inner
+
+
+def check_interaction_allowed(whitelist, update):
+    if whitelist is None:
+        return True  # If there is no whitelist, we allow everything
+    
+    chat_id = update.message.chat_id
+    user_id = update.message.from_user.id
+    
+    if chat_id in whitelist['CHATS']:
+        return True
+    
+    if user_id in whitelist['USERS']:
+        return True
+    
+    return False
+
+
 def get_human_name(from_user):
     if hasattr(from_user, 'first_name') and hasattr(from_user, 'last_name'):
         if from_user['first_name'] is not None and len(from_user['first_name']) > 0:
@@ -74,9 +130,12 @@ def get_human_name(from_user):
     return None  # If there is no luck
 
 
-def create_chat_folder(effective_chat):
+def create_chat_folder(effective_chat, reset_chat=False):
     chat_id = str(effective_chat.id)
-    chat_folder = os.path.join(CURRENT_DIR, CHAT_FOLDER, chat_id)  
+    chat_folder = os.path.join(CURRENT_DIR, CHAT_FOLDER, chat_id)
+    
+    if reset_chat and os.path.isdir(chat_folder):
+        shutil.rmtree(chat_folder)  # We erase all conversation/pictures/whatever
     
     if not os.path.isdir(chat_folder):
         os.makedirs(chat_folder, exist_ok=True)
@@ -84,7 +143,7 @@ def create_chat_folder(effective_chat):
         pkl_file = os.path.join(chat_folder, CHAT_PKL)
         
         with open(pkl_file, "wb") as chat_file:
-            pickle.dump({'metadata': effective_chat.to_dict(), 'chat': []}, chat_file, protocol=pickle.HIGHEST_PROTOCOL)  # TODO: effective_chat.to_dict() at the metadata field?
+            pickle.dump({'metadata': effective_chat.to_dict(), 'chat': []}, chat_file, protocol=pickle.HIGHEST_PROTOCOL)
     
     return chat_folder
 
@@ -257,7 +316,10 @@ def talk_to_openai(message, update, store_conv=False, prompt_text=DEFAULT_PROMPT
     return answ
 
     
-def bot_pic_handler(update, context):
+def bot_pic_handler(update, context, prompt_text=None):
+    if prompt_text is None:
+        prompt_text = CURRENT_PROMPT
+    
     human_name = get_human_name(from_user=update.message.from_user)
     
     # TODO: IMPLEMENT PROPERLY
@@ -273,7 +335,7 @@ def bot_pic_handler(update, context):
     
     logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) sends \\PIC ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, message_id=update.message.message_id, user_msg=msg))
     
-    answ = talk_to_openai(message=msg, update=update, store_conv=STORE_CONV, prompt_text=CURRENT_PROMPT, human_name=human_name, bot_name=DEFAULT_BOT)
+    answ = talk_to_openai(message=msg, update=update, store_conv=STORE_CONV, prompt_text=prompt_text, human_name=human_name, bot_name=DEFAULT_BOT)
 	
     context.bot.send_message(chat_id=update.effective_chat.id, text="Let me think...")
     
@@ -294,7 +356,11 @@ def bot_pic_handler(update, context):
                            allow_sending_without_reply=True)
 
 
-def bot_ai_handler(update, context):
+@whitelist_filter
+def bot_ai_handler(update, context, prompt_text=None):
+    if prompt_text is None:
+        prompt_text = CURRENT_PROMPT
+    
     human_name = get_human_name(from_user=update.message.from_user)
     
     if human_name is None:
@@ -308,13 +374,20 @@ def bot_ai_handler(update, context):
     
     logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) sends \\AI ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, message_id=update.message.message_id, user_msg=msg))
     
-    answ = talk_to_openai(message=msg, update=update, store_conv=STORE_CONV, prompt_text=CURRENT_PROMPT, human_name=human_name, bot_name=DEFAULT_BOT)
+    if len(msg) == 0:
+        return
+    
+    answ = talk_to_openai(message=msg, update=update, store_conv=STORE_CONV, prompt_text=prompt_text, human_name=human_name, bot_name=DEFAULT_BOT)
     
     logger.info('Chat {chat_id} ({chat_name}) - BOT ({bot_name}) answers \\AI ({message_id}): "{bot_answ}"'.format(chat_name=chat_name, chat_id=chat_id, bot_name=DEFAULT_BOT, message_id=update.message.message_id, bot_answ=answ))
+    
+    if len(answ) == 0:
+        return
 	
     context.bot.send_message(chat_id=chat_id, text=answ)
 
 
+@whitelist_filter
 def bot_TEXT_handler(update, context):
     human_name = get_human_name(from_user=update.message.from_user)
     
@@ -335,6 +408,40 @@ def bot_TEXT_handler(update, context):
     
         # Store question in file
         save_interaction(chat_folder=chat_folder, user_name=human_name, msg_text=msg)
+
+
+def bot_reset_handler(update, context):  # Resets the conversation memory of the chat
+    human_name = get_human_name(from_user=update.message.from_user)
+    
+    if human_name is None:
+        human_name = DEFAULT_HUMAN
+    
+    user = update.message.from_user
+    chat_id = update.effective_chat.id
+    chat_name = update.effective_chat.title if hasattr(update.effective_chat, 'title') else None
+    
+    logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) sends \\RESET ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, message_id=update.message.message_id, user_msg=msg))
+    
+    chat_folder = create_chat_folder(effective_chat=update.effective_chat, reset_chat=True)
+    
+    logger.info('Chat {chat_id} ({chat_name}) - Deleted chat for user {user_id} ({user_name}): "{chat_folder}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, chat_folder=chat_folder))
+    
+    context.bot.send_message(chat_id=chat_id, text="I forgor 💀")
+
+
+def bot_help_handler(update, context):
+    human_name = get_human_name(from_user=update.message.from_user)
+    
+    if human_name is None:
+        human_name = DEFAULT_HUMAN
+    
+    user = update.message.from_user
+    chat_id = update.effective_chat.id
+    chat_name = update.effective_chat.title if hasattr(update.effective_chat, 'title') else None
+    
+    logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) sends \\HELP ({message_id})'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, message_id=update.message.message_id))
+    
+    context.bot.send_message(chat_id=chat_id, text="Hello there! I'm {bot_name}, a conversational artificial intelligence.\n\nYou can query me by starting your messages with \"\\AI\".".format(bot_name=DEFAULT_BOT))
 
 
 def bot_ERROR_handler(update, context):
@@ -370,6 +477,22 @@ def bot_ERROR_handler(update, context):
     raise context.error
 
 
+def _read_whitelist_file(file_name):
+    with open(file_name, 'r') as f:
+        data = yaml.safe_load(f)
+    
+    if 'CHATS' not in data:
+        data['CHATS'] = []
+    
+    if 'USERS' not in data:
+        data['USERS'] = []
+    
+    # To ease lookups
+    data['CHATS'] = set(data['CHATS'])
+    data['USERS'] = set(data['USERS'])
+    
+    return data
+
 def _read_prompt_file(file_name):
     with open(file_name, 'r') as f:
         prompt_text = f.read().strip()
@@ -384,7 +507,7 @@ def _read_key(file_name):
     
     return key
 
-def main(prompt_file=None, store_conv=False):
+def main(prompt_file=None, store_conv=False, whitelist_file=None, strict_white_list=False):
     openai.api_key = _read_key(os.path.join('keys', 'openai'))
     telegram_key = _read_key(os.path.join('keys', 'telegram'))
     
@@ -399,6 +522,14 @@ def main(prompt_file=None, store_conv=False):
     global STORE_CONV
     STORE_CONV = store_conv
     
+    global CHAT_WHITELIST
+    if whitelist_file is not None:
+        CHAT_WHITELIST = _read_whitelist_file(file_name=whitelist_file)
+    else:
+        CHAT_WHITELIST = None
+    
+    global STRICT_WHITE_LIST
+    STRICT_WHITE_LIST = strict_white_list
     
     
     # Create the EventHandler and pass it your bot's token.
@@ -410,6 +541,10 @@ def main(prompt_file=None, store_conv=False):
     dp.add_handler(CommandHandler("AI", bot_ai_handler))
     
     dp.add_handler(CommandHandler("PIC", bot_pic_handler))
+    
+    dp.add_handler(CommandHandler("RESET", bot_reset_handler))
+    
+    dp.add_handler(CommandHandler("HELP", bot_help_handler))
 
     # on noncommand i.e message - echo the message on Telegram
     dp.add_handler(MessageHandler(Filters.text, bot_TEXT_handler))
@@ -429,12 +564,13 @@ def main(prompt_file=None, store_conv=False):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Tracks a target inside a video and displays the results')
     parser.add_argument('--prompt', metavar='file', default=None, help='file storing the prompt')
+    parser.add_argument('--white-list', metavar='file', default=None, help='user/chat whitelist to filter interactions')
+    parser.add_argument('--strict-white-list', action='store_true', help='only allows whitelisted users to run the language model')
     parser.add_argument('--store-chats', action='store_true', help='store chats for logging and answering')
     args = parser.parse_args()
     
     # We create the necessary dirs
-    if args.store_chats:
-        os.makedirs(os.path.join(CURRENT_DIR, CHAT_FOLDER), exist_ok=True)
+    os.makedirs(os.path.join(CURRENT_DIR, CHAT_FOLDER), exist_ok=True)
     
-    main(prompt_file=args.prompt, store_conv=args.store_chats)
+    main(prompt_file=args.prompt, store_conv=args.store_chats, whitelist_file=args.white_list, strict_white_list=args.strict_white_list)
 
