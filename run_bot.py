@@ -25,6 +25,7 @@ import shutil
 CURRENT_DIR = os.path.dirname(__file__)
 
 STORE_CONV = False
+LOGS_FOLDER = 'log'
 CHAT_FOLDER = 'chats'
 PICS_FOLDER = 'pic'
 CHAT_PKL = 'chat.pkl'
@@ -66,8 +67,11 @@ class SafeDict(dict):  # To not replace stuff if it's not available
 
 def whitelist_filter(func):
     def inner(*args, **kwargs):
-        update = kwargs.get('update', None)
-        context = kwargs.get('context', None)
+        
+        if len(args) < 2:
+            return
+        update = args[0]
+        context = args[1]
         
         if update is None or context is None:
             return
@@ -85,8 +89,8 @@ def whitelist_filter(func):
         if not interaction_allowed:
             if STRICT_WHITE_LIST:  # If the white-list is strict, we reply with an error and return
                 
-                logger.warning('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) has been strictly whitelisted. Sends ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, message_id=update.message.message_id, user_msg=msg))
-                context.bot.send_message(chat_id=chat_id, text="An error has occured. Please try again later.\nIf the problem persists, please [contact support](https://latlmes.com/chatbot/help).", disable_web_page_preview=True, parse_mode='MarkdownV2')
+                logger.warning('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) has been strictly whitelisted. Sends ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, message_id=update.message.message_id, user_msg=update.message.text))
+                context.bot.send_message(chat_id=chat_id, text='An error has occured. Please try again later.\nIf the problem persists, please <a href="https://latlmes.com/chatbot/help">contact support</a>.', disable_web_page_preview=True, parse_mode='HTML')
                 return
             
             else:
@@ -420,7 +424,7 @@ def bot_reset_handler(update, context):  # Resets the conversation memory of the
     chat_id = update.effective_chat.id
     chat_name = update.effective_chat.title if hasattr(update.effective_chat, 'title') else None
     
-    logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) sends \\RESET ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, message_id=update.message.message_id, user_msg=msg))
+    logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) sends \\RESET ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, message_id=update.message.message_id, user_msg=update.message.text))
     
     chat_folder = create_chat_folder(effective_chat=update.effective_chat, reset_chat=True)
     
@@ -571,6 +575,13 @@ if __name__ == '__main__':
     
     # We create the necessary dirs
     os.makedirs(os.path.join(CURRENT_DIR, CHAT_FOLDER), exist_ok=True)
+    os.makedirs(os.path.join(CURRENT_DIR, LOGS_FOLDER), exist_ok=True)
+    
+    logs_file = os.path.join(CURRENT_DIR, LOGS_FOLDER, 'log.log')
+    
+    fh = logging.FileHandler(logs_file)
+    fh.setLevel(logging.DEBUG)
+    logger.addHandler(fh)
     
     main(prompt_file=args.prompt, store_conv=args.store_chats, whitelist_file=args.white_list, strict_white_list=args.strict_white_list)
 
