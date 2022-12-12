@@ -319,7 +319,8 @@ def talk_to_openai(message, update, store_conv=False, prompt_text=DEFAULT_PROMPT
 	
     return answ
 
-    
+
+@whitelist_filter
 def bot_pic_handler(update, context, prompt_text=None):
     if prompt_text is None:
         prompt_text = CURRENT_PROMPT
@@ -391,7 +392,6 @@ def bot_ai_handler(update, context, prompt_text=None):
     context.bot.send_message(chat_id=chat_id, text=answ)
 
 
-@whitelist_filter
 def bot_TEXT_handler(update, context):
     human_name = get_human_name(from_user=update.message.from_user)
     
