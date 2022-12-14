@@ -85,17 +85,18 @@ def whitelist_filter(func):
         user = update.message.from_user
         chat_id = update.effective_chat.id
         chat_name = update.effective_chat.title if hasattr(update.effective_chat, 'title') else None
+        telegram_username = update.message.from_user.username if hasattr(update.message.from_user, 'username') else None
         
         if not interaction_allowed:
             if STRICT_WHITE_LIST:  # If the white-list is strict, we reply with an error and return
                 
-                logger.warning('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) has been strictly whitelisted. Sends ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, message_id=update.message.message_id, user_msg=update.message.text))
+                logger.warning('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}, {t_username}) has been strictly whitelisted. Sends ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, t_username=telegram_username, message_id=update.message.message_id, user_msg=update.message.text))
                 context.bot.send_message(chat_id=chat_id, text='An error has occured. Please try again later.\nIf the problem persists, please <a href="https://latlmes.com/chatbot/help">contact support</a>.', disable_web_page_preview=True, parse_mode='HTML')
                 return
             
             else:
                   # If the white-list is strict, we reply with the default and safe PROMPT
-                  logger.warning('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) has been shadow whitelisted.'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name))
+                  logger.warning('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}, {t_username}) has been shadow whitelisted.'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, t_username=telegram_username))
                   
                   return func(*args, **kwargs, prompt_text=DEFAULT_PROMPT)
             
@@ -335,10 +336,11 @@ def bot_pic_handler(update, context, prompt_text=None):
     user = update.message.from_user
     chat_id = update.effective_chat.id
     chat_name = update.effective_chat.title if hasattr(update.effective_chat, 'title') else None
+    telegram_username = update.message.from_user.username if hasattr(update.message.from_user, 'username') else None
     
     msg = clean_query(update.message.text)
     
-    logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) sends \\PIC ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, message_id=update.message.message_id, user_msg=msg))
+    logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}, {t_username}) sends /PIC ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, t_username=telegram_username, message_id=update.message.message_id, user_msg=msg))
     
     answ = talk_to_openai(message=msg, update=update, store_conv=STORE_CONV, prompt_text=prompt_text, human_name=human_name, bot_name=DEFAULT_BOT)
 	
@@ -352,7 +354,7 @@ def bot_pic_handler(update, context, prompt_text=None):
     
     latest_file = generate_image(prompt_text=answ)
     
-    logger.info('Chat {chat_id} ({chat_name}) - BOT ({bot_name}) answers \\PIC ({message_id}): "{bot_answ}"'.format(chat_name=chat_name, chat_id=chat_id, bot_name=DEFAULT_BOT, message_id=update.message.message_id, bot_answ=answ))
+    logger.info('Chat {chat_id} ({chat_name}) - BOT ({bot_name}) answers /PIC ({message_id}): "{bot_answ}"'.format(chat_name=chat_name, chat_id=chat_id, bot_name=DEFAULT_BOT, message_id=update.message.message_id, bot_answ=answ))
     
     context.bot.send_photo(chat_id=update.effective_chat.id,
                            photo=open(latest_file, 'rb'),
@@ -374,17 +376,18 @@ def bot_ai_handler(update, context, prompt_text=None):
     user = update.message.from_user
     chat_id = update.effective_chat.id
     chat_name = update.effective_chat.title if hasattr(update.effective_chat, 'title') else None
+    telegram_username = update.message.from_user.username if hasattr(update.message.from_user, 'username') else None
     
     msg = clean_query(update.message.text)
     
-    logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) sends \\AI ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, message_id=update.message.message_id, user_msg=msg))
+    logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}, {t_username}) sends /AI ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, t_username=telegram_username, message_id=update.message.message_id, user_msg=msg))
     
     if len(msg) == 0:
         return
     
     answ = talk_to_openai(message=msg, update=update, store_conv=STORE_CONV, prompt_text=prompt_text, human_name=human_name, bot_name=DEFAULT_BOT)
     
-    logger.info('Chat {chat_id} ({chat_name}) - BOT ({bot_name}) answers \\AI ({message_id}): "{bot_answ}"'.format(chat_name=chat_name, chat_id=chat_id, bot_name=DEFAULT_BOT, message_id=update.message.message_id, bot_answ=answ))
+    logger.info('Chat {chat_id} ({chat_name}) - BOT ({bot_name}) answers /AI ({message_id}): "{bot_answ}"'.format(chat_name=chat_name, chat_id=chat_id, bot_name=DEFAULT_BOT, message_id=update.message.message_id, bot_answ=answ))
     
     if len(answ) == 0:
         return
@@ -401,10 +404,11 @@ def bot_TEXT_handler(update, context):
     user = update.message.from_user
     chat_id = update.effective_chat.id
     chat_name = update.effective_chat.title if hasattr(update.effective_chat, 'title') else None
+    telegram_username = update.message.from_user.username if hasattr(update.message.from_user, 'username') else None
     
     msg = clean_query(update.message.text)
     
-    logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) sends TEXT ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, message_id=update.message.message_id, user_msg=msg))
+    logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}, {t_username}) sends TEXT ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, t_username=telegram_username, message_id=update.message.message_id, user_msg=msg))
 	
     if STORE_CONV:
         # We create (or get) file with chat_id conversation
@@ -423,12 +427,13 @@ def bot_reset_handler(update, context):  # Resets the conversation memory of the
     user = update.message.from_user
     chat_id = update.effective_chat.id
     chat_name = update.effective_chat.title if hasattr(update.effective_chat, 'title') else None
+    telegram_username = update.message.from_user.username if hasattr(update.message.from_user, 'username') else None
     
-    logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) sends \\RESET ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, message_id=update.message.message_id, user_msg=update.message.text))
+    logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}, {t_username}) sends /RESET ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, t_username=telegram_username, message_id=update.message.message_id, user_msg=update.message.text))
     
     chat_folder = create_chat_folder(effective_chat=update.effective_chat, reset_chat=True)
     
-    logger.info('Chat {chat_id} ({chat_name}) - Deleted chat for user {user_id} ({user_name}): "{chat_folder}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, chat_folder=chat_folder))
+    logger.info('Chat {chat_id} ({chat_name}) - Deleted chat for user {user_id} ({user_name}, {t_username}): "{chat_folder}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, t_username=telegram_username, chat_folder=chat_folder))
     
     context.bot.send_message(chat_id=chat_id, text="I forgor 💀")
 
@@ -442,10 +447,11 @@ def bot_help_handler(update, context):
     user = update.message.from_user
     chat_id = update.effective_chat.id
     chat_name = update.effective_chat.title if hasattr(update.effective_chat, 'title') else None
+    telegram_username = update.message.from_user.username if hasattr(update.message.from_user, 'username') else None
     
-    logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) sends \\HELP ({message_id})'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, message_id=update.message.message_id))
+    logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}, {t_username}) sends /HELP ({message_id})'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, t_username=telegram_username, message_id=update.message.message_id))
     
-    context.bot.send_message(chat_id=chat_id, text="Hello there! I'm {bot_name}, a conversational artificial intelligence.\n\nYou can query me by starting your messages with \"\\AI\".".format(bot_name=DEFAULT_BOT))
+    context.bot.send_message(chat_id=chat_id, text="Hello there! I'm {bot_name}, a conversational artificial intelligence.\n\nYou can query me by starting your messages with \"/AI\".".format(bot_name=DEFAULT_BOT))
 
 
 def bot_ERROR_handler(update, context):
@@ -472,12 +478,14 @@ def bot_ERROR_handler(update, context):
     if hasattr(update, 'message') and hasattr(update.message, 'from_user'):
         user_id = update.message.from_user.id
         user_name = get_human_name(from_user=update.message.from_user)
+        telegram_username = update.message.from_user.username if hasattr(update.message.from_user, 'username') else None
     else:
         user_id = None
         user_name = None
+        telegram_username = None
     
     
-    logger.warning('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}) with message ({message_id}) "{user_msg}" caused error "{error_txt}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user_id, user_name=user_name, message_id=message_id, user_msg=message_text, error_txt=context.error))
+    logger.warning('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}, {t_username}) with message ({message_id}) "{user_msg}" caused error "{error_txt}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user_id, user_name=user_name, t_username=telegram_username, message_id=message_id, user_msg=message_text, error_txt=context.error))
     raise context.error
 
 
