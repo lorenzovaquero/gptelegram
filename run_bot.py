@@ -121,6 +121,17 @@ def check_interaction_allowed(whitelist, update):
     
     return False
 
+def check_admin_allowed(whitelist, update):
+    if whitelist is None:
+        return False  # If there is no whitelist, we block everything
+    
+    user_id = update.message.from_user.id
+    
+    if user_id in whitelist['ADMINS']:
+        return True
+    
+    return False
+
 
 def get_human_name(from_user):
     if hasattr(from_user, 'first_name') and hasattr(from_user, 'last_name'):
@@ -438,6 +449,62 @@ def bot_reset_handler(update, context):  # Resets the conversation memory of the
     context.bot.send_message(chat_id=chat_id, text="I forgor 💀")
 
 
+def get_registered_chats(context):
+    chats_folder = os.path.join(CURRENT_DIR, CHAT_FOLDER)
+    chat_dirs = [f for f in os.path.listdir(chats_folder) if os.path.isdir(os.path.join(chats_folder, f))]
+    
+    registered_chats = []
+    for chat_id in chat_dirs:
+        chat = context.bot.get_chat(int(chat_id))
+        registered_chats.append(chat)
+    
+    return registered_chats
+
+
+def bot_status_handler(update, context):  # Prints the status and current users of the bot
+    human_name = get_human_name(from_user=update.message.from_user)
+    
+    if human_name is None:
+        human_name = DEFAULT_HUMAN
+    
+    user = update.message.from_user
+    chat_id = update.effective_chat.id
+    chat_name = update.effective_chat.title if hasattr(update.effective_chat, 'title') else None
+    telegram_username = update.message.from_user.username if hasattr(update.message.from_user, 'username') else None
+    
+    admin_allowed = check_admin_allowed(whitelist=CHAT_WHITELIST, update=update)
+    log_msg = 'ALLOWED' if admin_allowed else 'DENIED'
+    
+    logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}, {t_username}) sends /STATUS ({message_id}). Query {log_msg}: "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, t_username=telegram_username, message_id=update.message.message_id, user_msg=update.message.text, log_msg=log_msg))
+    
+    if not admin_allowed:
+        return  # We return silently
+    
+    registered_chats = get_registered_chats(context=context)
+    registered_users = [c for c in registered_chats if c.type == 'PRIVATE']
+    registered_groups = [c for c in registered_chats if c.type in set(['GROUP', 'SUPERGROUP', 'CHANNEL'])]
+    
+    status_msg 'Hi {user_name} (@{t_username}, {user_id}).\nSo far {num_user} users and {num_groups} groups have used the bot:\nUSERS:'.format(user_id=user.id, user_name=human_name, t_username=telegram_username, num_user=len(registered_users), num_groups=len(registered_groups))
+    
+    for registered_user in registered_users:
+        reg_id = registered_user.id
+        reg_human_name = get_human_name(from_user=registered_user)
+        reg_t_username = ('@' + registered_user.username) if hasattr(registered_user, 'username') else None
+        
+        status_msg = status_msg + '\n  {user_id}: {user_name} ({t_username})'.format(user_id=reg_id, user_name=reg_human_name, t_username=reg_t_username)  # TODO: Add info like last message date or something
+    
+    status_msg = status_msg + '\nGROUPS:'
+    
+    for registered_group in registered_groups:
+        reg_id = registered_group.id
+        reg_title = registered_group.title
+        reg_t_username = ('@' + registered_group.username) if hasattr(registered_group, 'username') else None
+        
+        status_msg = status_msg + '\n  {group_id}: {group_title} ({t_username})'.format(group_id=reg_id, group_title=reg_title, t_username=reg_t_username)  # TODO: Add info like last message date or something
+    
+    context.bot.send_message(chat_id=chat_id, text=status_msg)
+
+
 def bot_help_handler(update, context):
     human_name = get_human_name(from_user=update.message.from_user)
     
@@ -499,9 +566,13 @@ def _read_whitelist_file(file_name):
     if 'USERS' not in data:
         data['USERS'] = []
     
+    if 'ADMINS' not in data:
+        data['ADMINS'] = []
+    
     # To ease lookups
     data['CHATS'] = set(data['CHATS'])
     data['USERS'] = set(data['USERS'])
+    data['ADMINS'] = set(data['ADMINS'])
     
     return data
 
@@ -557,6 +628,9 @@ def main(prompt_file=None, store_conv=False, whitelist_file=None, strict_white_l
     dp.add_handler(CommandHandler("RESET", bot_reset_handler))
     
     dp.add_handler(CommandHandler("HELP", bot_help_handler))
+    dp.add_handler(CommandHandler("START", bot_help_handler))  # Just in case someone writes "/start" (apparently people do that)
+    
+    dp.add_handler(CommandHandler("STATUS", bot_status_handler))  # Only ADMIN can use this command
 
     # on noncommand i.e message - echo the message on Telegram
     dp.add_handler(MessageHandler(Filters.text, bot_TEXT_handler))
@@ -589,6 +663,8 @@ if __name__ == '__main__':
     
     fh = logging.FileHandler(logs_file)
     fh.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    fh.setFormatter(formatter)
     logger.addHandler(fh)
     
     main(prompt_file=args.prompt, store_conv=args.store_chats, whitelist_file=args.white_list, strict_white_list=args.strict_white_list)
