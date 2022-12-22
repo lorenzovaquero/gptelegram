@@ -15,6 +15,7 @@ bot.
 import argparse
 import yaml
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+from telegram import Chat
 import logging, os, random, sys, datetime, glob
 from dateutil.relativedelta import relativedelta
 import openai
@@ -187,18 +188,25 @@ def load_interaction(chat_folder):
 
 
 def clean_query(msg_text, max_chars=MAX_IN_CHARS):
+    initial_len = len(msg_text)
     if msg_text.startswith('/'):
         msg_text = msg_text.split(' ', 1)[-1]  # We remove the '/AI ' (or whatever) part
+        
+        if len(msg_text) == initial_len:
+            # This implies that the command was only the '/AI'
+            msg_text = ''
+            
         msg_text = msg_text.strip()
     
     if len(msg_text) == 0:
-        raise ValueError('Empty query')
+        # raise ValueError('Empty query')
+        return msg_text
     
     msg_text = msg_text[:max_chars]  # So we don't end up poor
 
     # We add a trailing dot if the text does not end with one
     last_char = msg_text[-1]
-    if last_char not in set(['.', '!', '?']):
+    if last_char not in set(['.', '!', '?', ':']):
         msg_text = msg_text + '.'
     
     return msg_text
@@ -396,6 +404,8 @@ def bot_ai_handler(update, context, prompt_text=None):
     if len(msg) == 0:
         return
     
+    print(msg)
+    
     answ = talk_to_openai(message=msg, update=update, store_conv=STORE_CONV, prompt_text=prompt_text, human_name=human_name, bot_name=DEFAULT_BOT)
     
     logger.info('Chat {chat_id} ({chat_name}) - BOT ({bot_name}) answers /AI ({message_id}): "{bot_answ}"'.format(chat_name=chat_name, chat_id=chat_id, bot_name=DEFAULT_BOT, message_id=update.message.message_id, bot_answ=answ))
@@ -451,11 +461,24 @@ def bot_reset_handler(update, context):  # Resets the conversation memory of the
 
 def get_registered_chats(context):
     chats_folder = os.path.join(CURRENT_DIR, CHAT_FOLDER)
-    chat_dirs = [f for f in os.path.listdir(chats_folder) if os.path.isdir(os.path.join(chats_folder, f))]
+    chat_dirs = [f for f in os.listdir(chats_folder) if os.path.isdir(os.path.join(chats_folder, f))]
     
     registered_chats = []
     for chat_id in chat_dirs:
-        chat = context.bot.get_chat(int(chat_id))
+        try:
+            chat = context.bot.get_chat(int(chat_id))
+            chat.error = False  # We manually add this field to know that it didn't error
+            
+        except Exception as e:
+            logger.warning("Can't get chat info for {chat_id}: {err_msg}".format(chat_id=chat_id, err_msg=str(e)))
+            
+            # We fallback to the saved info
+            chat_data = load_interaction(chat_folder=os.path.join(CURRENT_DIR, CHAT_FOLDER, str(chat_id)))
+            
+            chat = Chat(**chat_data['metadata'])
+            chat.error = True  # We manually add this field to know that it errored
+            chat.error_msg = str(e)
+        
         registered_chats.append(chat)
     
     return registered_chats
@@ -481,26 +504,34 @@ def bot_status_handler(update, context):  # Prints the status and current users 
         return  # We return silently
     
     registered_chats = get_registered_chats(context=context)
-    registered_users = [c for c in registered_chats if c.type == 'PRIVATE']
-    registered_groups = [c for c in registered_chats if c.type in set(['GROUP', 'SUPERGROUP', 'CHANNEL'])]
+    registered_users = [c for c in registered_chats if c.type.upper() == 'PRIVATE']
+    registered_groups = [c for c in registered_chats if c.type.upper() in set(['GROUP', 'SUPERGROUP', 'CHANNEL'])]
     
-    status_msg 'Hi {user_name} (@{t_username}, {user_id}).\nSo far {num_user} users and {num_groups} groups have used the bot:\nUSERS:'.format(user_id=user.id, user_name=human_name, t_username=telegram_username, num_user=len(registered_users), num_groups=len(registered_groups))
+    status_msg = 'Hi {user_name} (@{t_username}, {user_id}).\nSo far {num_user} users and {num_groups} groups have used the bot:\n\nUSERS:'.format(user_id=user.id, user_name=human_name, t_username=telegram_username, num_user=len(registered_users), num_groups=len(registered_groups))
     
     for registered_user in registered_users:
         reg_id = registered_user.id
         reg_human_name = get_human_name(from_user=registered_user)
-        reg_t_username = ('@' + registered_user.username) if hasattr(registered_user, 'username') else None
+        reg_t_username = ('@' + registered_user.username) if hasattr(registered_user, 'username') and registered_user.username is not None else None
         
-        status_msg = status_msg + '\n  {user_id}: {user_name} ({t_username})'.format(user_id=reg_id, user_name=reg_human_name, t_username=reg_t_username)  # TODO: Add info like last message date or something
+        user_status = '{user_id}: {user_name} ({t_username})'.format(user_id=reg_id, user_name=reg_human_name, t_username=reg_t_username)
+        if registered_user.error:
+            user_status += ' [ERR]'
+        
+        status_msg = status_msg + '\n    ' + user_status  # TODO: Add info like last message date or something
     
-    status_msg = status_msg + '\nGROUPS:'
+    status_msg = status_msg + '\n\nGROUPS:'
     
     for registered_group in registered_groups:
         reg_id = registered_group.id
         reg_title = registered_group.title
-        reg_t_username = ('@' + registered_group.username) if hasattr(registered_group, 'username') else None
+        reg_t_username = ('@' + registered_group.username) if hasattr(registered_group, 'username') and registered_group.username is not None else None
         
-        status_msg = status_msg + '\n  {group_id}: {group_title} ({t_username})'.format(group_id=reg_id, group_title=reg_title, t_username=reg_t_username)  # TODO: Add info like last message date or something
+        group_status = '{group_id}: {group_title} ({t_username})'.format(group_id=reg_id, group_title=reg_title, t_username=reg_t_username)
+        if registered_group.error:
+            group_status += ' [ERR]'
+        
+        status_msg = status_msg + '\n    ' + group_status  # TODO: Add info like last message date or something
     
     context.bot.send_message(chat_id=chat_id, text=status_msg)
 
@@ -518,7 +549,7 @@ def bot_help_handler(update, context):
     
     logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}, {t_username}) sends /HELP ({message_id})'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, t_username=telegram_username, message_id=update.message.message_id))
     
-    context.bot.send_message(chat_id=chat_id, text="Hello there! I'm {bot_name}, a conversational artificial intelligence.\n\nYou can query me by starting your messages with \"/AI\".".format(bot_name=DEFAULT_BOT))
+    context.bot.send_message(chat_id=chat_id, text="Hello there! I'm {bot_name}, a conversational artificial intelligence. You can query me by starting your messages with \"/AI\".\nFor example: \"/AI What's your name?\"".format(bot_name=DEFAULT_BOT))
 
 
 def bot_ERROR_handler(update, context):
