@@ -19,6 +19,7 @@ from telegram import Chat
 import logging, os, random, sys, datetime, glob
 from dateutil.relativedelta import relativedelta
 import openai
+from tenacity import retry, stop_after_attempt, wait_random_exponential  # for exponential backoff
 import subprocess
 import pickle
 import shutil
@@ -36,7 +37,7 @@ MAX_OUT_TOKENS = 250
 MAX_IN_CHARS = 500
 MAX_CONTEXT_MESSAGES = 6
 
-STABLE_DIFFUSION_PATH = ""
+STABLE_DIFFUSION_PATH = ""  # Add stable-diffusion path
 
 DEFAULT_HUMAN = "Lorenzo"
 DEFAULT_BOT = "Dabotni"
@@ -286,11 +287,16 @@ def generate_image(prompt_text):
     return latest_file
 
 
+@retry(wait=wait_random_exponential(min=1, max=10), stop=stop_after_attempt(6))
+def completion_with_backoff(**kwargs):
+    return openai.Completion.create(**kwargs)
+
+
 def get_openai_answer(msg_text, text_engine=DEFAULT_TEXT_ENGINE, human_name=DEFAULT_HUMAN, bot_name=DEFAULT_BOT):
     start_sequence = "\n{}:".format(bot_name)
     restart_sequence = "\n{}:".format(human_name)
 
-    response = openai.Completion.create(
+    response = completion_with_backoff(
       engine=text_engine,
       prompt=msg_text,
       temperature=0.9,
@@ -347,8 +353,6 @@ def bot_pic_handler(update, context, prompt_text=None):
     
     human_name = get_human_name(from_user=update.message.from_user)
     
-    # TODO: IMPLEMENT PROPERLY
-    
     if human_name is None:
         human_name = DEFAULT_HUMAN
     
@@ -361,23 +365,26 @@ def bot_pic_handler(update, context, prompt_text=None):
     
     logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}, {t_username}) sends /PIC ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, t_username=telegram_username, message_id=update.message.message_id, user_msg=msg))
     
+    if len(msg) == 0:
+        return
+    
     answ = talk_to_openai(message=msg, update=update, store_conv=STORE_CONV, prompt_text=prompt_text, human_name=human_name, bot_name=DEFAULT_BOT)
-	
+    
+    if len(answ) == 0:
+        return
+    
+    logger.info('Chat {chat_id} ({chat_name}) - BOT ({bot_name}) creates answer for /PIC ({message_id}): "{bot_answ}"'.format(chat_name=chat_name, chat_id=chat_id, bot_name=DEFAULT_BOT, message_id=update.message.message_id, bot_answ=answ))
+    
     context.bot.send_message(chat_id=update.effective_chat.id, text="Let me think...")
     
-    # We clean the answer
-    answ = answ.replace("{}:".format(human_name), "")
-    answ = answ.replace("{}:".format(bot_name), "")
-    answ = answ.replace("\n", " ")
-    answ = answ.strip()
-    
+    # TODO: Implement better!
     latest_file = generate_image(prompt_text=answ)
     
-    logger.info('Chat {chat_id} ({chat_name}) - BOT ({bot_name}) answers /PIC ({message_id}): "{bot_answ}"'.format(chat_name=chat_name, chat_id=chat_id, bot_name=DEFAULT_BOT, message_id=update.message.message_id, bot_answ=answ))
+    logger.info('Chat {chat_id} ({chat_name}) - BOT ({bot_name}) answers /PIC ({message_id}, {file_name}): "{bot_answ}"'.format(chat_name=chat_name, chat_id=chat_id, bot_name=DEFAULT_BOT, message_id=update.message.message_id, file_name=latest_file, bot_answ=answ))
     
     context.bot.send_photo(chat_id=update.effective_chat.id,
                            photo=open(latest_file, 'rb'),
-                           caption=original_answ,
+                           caption=answ,
                            reply_to_message_id=update.message.message_id,
                            allow_sending_without_reply=True)
 
@@ -403,8 +410,6 @@ def bot_ai_handler(update, context, prompt_text=None):
     
     if len(msg) == 0:
         return
-    
-    print(msg)
     
     answ = talk_to_openai(message=msg, update=update, store_conv=STORE_CONV, prompt_text=prompt_text, human_name=human_name, bot_name=DEFAULT_BOT)
     
@@ -654,7 +659,8 @@ def main(prompt_file=None, store_conv=False, whitelist_file=None, strict_white_l
 	
     dp.add_handler(CommandHandler("AI", bot_ai_handler))
     
-    dp.add_handler(CommandHandler("PIC", bot_pic_handler))
+    if STABLE_DIFFUSION_PATH is not None and len(STABLE_DIFFUSION_PATH) > 0:
+        dp.add_handler(CommandHandler("PIC", bot_pic_handler))
     
     dp.add_handler(CommandHandler("RESET", bot_reset_handler))
     
