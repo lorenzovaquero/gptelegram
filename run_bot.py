@@ -16,7 +16,7 @@ import argparse
 import yaml
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 from telegram import Chat
-import logging, os, random, sys, datetime, glob
+import logging, os, random, sys, datetime, glob, time
 from dateutil.relativedelta import relativedelta
 import openai
 from tenacity import retry, stop_after_attempt, wait_random_exponential  # for exponential backoff
@@ -135,6 +135,17 @@ def check_admin_allowed(whitelist, update):
     return False
 
 
+def convert_tokens_to_dollars(num_tokens):
+    if DEFAULT_TEXT_ENGINE.startswith('text-davinci'):
+        multiplier = 0.00002  # $0.0200 / 1K tokens
+    
+    else:
+        raise NotImplementedError
+    
+    dollars = num_tokens * multiplier
+    
+    return dollars
+
 def get_human_name(from_user):
     if hasattr(from_user, 'first_name') and hasattr(from_user, 'last_name'):
         if from_user['first_name'] is not None and len(from_user['first_name']) > 0:
@@ -148,12 +159,26 @@ def get_human_name(from_user):
     return None  # If there is no luck
 
 
-def create_chat_folder(effective_chat, reset_chat=False):
+def get_chat_folder(effective_chat, reset_chat=False, hard_reset=False):
+    """Gets (or creates) a chat folder. Reset chat deletes the conversation data, not the metadata (unless hard_reset is set to True)"""
     chat_id = str(effective_chat.id)
     chat_folder = os.path.join(CURRENT_DIR, CHAT_FOLDER, chat_id)
     
     if reset_chat and os.path.isdir(chat_folder):
-        shutil.rmtree(chat_folder)  # We erase all conversation/pictures/whatever
+        if hard_reset:  # We erase all conversation/pictures/whatever
+            shutil.rmtree(chat_folder)
+        
+        else:  # We erase conversation history and pictures folder
+            # TODO: Delete pictures folder
+            
+            pkl_file = os.path.join(chat_folder, CHAT_PKL)
+            with open(pkl_file, "rb") as chat_file:
+                chat_data = pickle.load(chat_file)
+            
+            chat_data['chat'] = []  # Reset conv history
+            chat_data['metadata'] = effective_chat.to_dict()  # Also update metadata
+            with open(pkl_file, "wb") as chat_file:
+                pickle.dump(chat_data, chat_file, protocol=pickle.HIGHEST_PROTOCOL)
     
     if not os.path.isdir(chat_folder):
         os.makedirs(chat_folder, exist_ok=True)
@@ -161,7 +186,7 @@ def create_chat_folder(effective_chat, reset_chat=False):
         pkl_file = os.path.join(chat_folder, CHAT_PKL)
         
         with open(pkl_file, "wb") as chat_file:
-            pickle.dump({'metadata': effective_chat.to_dict(), 'chat': []}, chat_file, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump({'metadata': effective_chat.to_dict(), 'chat': [], 'members': {}, 'total_tokens': 0, 'usage': []}, chat_file, protocol=pickle.HIGHEST_PROTOCOL)
     
     return chat_folder
 
@@ -176,6 +201,25 @@ def save_interaction(chat_folder, user_name, msg_text):
         chat_data['chat'].append(new_data)
         # TODO: Maybe limit it so we delete oldest interactions?
 
+        pickle.dump(chat_data, chat_file, protocol=pickle.HIGHEST_PROTOCOL)
+
+def save_usage(chat_folder, user, num_tokens):
+    user_id = user.id
+    
+    pkl_file = os.path.join(chat_folder, CHAT_PKL)
+    with open(pkl_file, "rb") as chat_file:
+        chat_data = pickle.load(chat_file)
+    
+    chat_data['total_tokens'] += num_tokens
+    chat_data['usage'].append((time.time(), user_id, num_tokens))  # triplets [time, user, tokens]
+    
+    
+    if user_id not in chat_data['members']:
+        chat_data['members'][user_id] = {'metadata': user.to_dict(), 'total_tokens': 0}
+    
+    chat_data['members'][user_id]['total_tokens'] += num_tokens
+    
+    with open(pkl_file, "wb") as chat_file:
         pickle.dump(chat_data, chat_file, protocol=pickle.HIGHEST_PROTOCOL)
 
 
@@ -292,7 +336,7 @@ def completion_with_backoff(**kwargs):
     return openai.Completion.create(**kwargs)
 
 
-def get_openai_answer(msg_text, text_engine=DEFAULT_TEXT_ENGINE, human_name=DEFAULT_HUMAN, bot_name=DEFAULT_BOT):
+def get_openai_answer(msg_text, text_engine=DEFAULT_TEXT_ENGINE, human_name=DEFAULT_HUMAN, bot_name=DEFAULT_BOT, user_id=''):
     start_sequence = "\n{}:".format(bot_name)
     restart_sequence = "\n{}:".format(human_name)
 
@@ -304,21 +348,23 @@ def get_openai_answer(msg_text, text_engine=DEFAULT_TEXT_ENGINE, human_name=DEFA
       top_p=1,
       frequency_penalty=0,
       presence_penalty=0.6,
-      stop=[restart_sequence, start_sequence]
+      stop=[restart_sequence, start_sequence],
+      user=str(user_id)
     )
     answ = response.choices[0].text
+    total_tokens = response.usage.total_tokens
 
-    return answ
+    return answ, total_tokens
 
 
 def talk_to_openai(message, update, store_conv=False, prompt_text=DEFAULT_PROMPT, human_name=DEFAULT_HUMAN, bot_name=DEFAULT_BOT):
     user = update.message.from_user
     chat_id = update.effective_chat.id
+    
+    # We create (or get) file with chat_id conversation
+    chat_folder = get_chat_folder(effective_chat=update.effective_chat)
 	
     if store_conv:
-        # We create (or get) file with chat_id conversation
-        chat_folder = create_chat_folder(effective_chat=update.effective_chat)
-    
         # Retrieve conv_context
         conv_context_data = load_interaction(chat_folder=chat_folder)
     
@@ -335,9 +381,11 @@ def talk_to_openai(message, update, store_conv=False, prompt_text=DEFAULT_PROMPT
 	
     openai_query = assemble_openai_query(prompt=prompt, query=message)
     
-    answ = get_openai_answer(openai_query, human_name=human_name, bot_name=bot_name)
+    answ, total_tokens = get_openai_answer(openai_query, human_name=human_name, bot_name=bot_name, user_id=update.message.from_user.id)
     
     answ = clean_answer(answ)
+    
+    save_usage(chat_folder=chat_folder, user=user, num_tokens=total_tokens)
     
     if store_conv:
         # Store answer in file
@@ -436,10 +484,10 @@ def bot_TEXT_handler(update, context):
     
     logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}, {t_username}) sends TEXT ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, t_username=telegram_username, message_id=update.message.message_id, user_msg=msg))
 	
+	# We create (or get) file with chat_id conversation
+    chat_folder = get_chat_folder(effective_chat=update.effective_chat)
+	
     if STORE_CONV:
-        # We create (or get) file with chat_id conversation
-        chat_folder = create_chat_folder(effective_chat=update.effective_chat)
-    
         # Store question in file
         save_interaction(chat_folder=chat_folder, user_name=human_name, msg_text=msg)
 
@@ -457,7 +505,7 @@ def bot_reset_handler(update, context):  # Resets the conversation memory of the
     
     logger.info('Chat {chat_id} ({chat_name}) - User {user_id} ({user_name}, {t_username}) sends /RESET ({message_id}): "{user_msg}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, t_username=telegram_username, message_id=update.message.message_id, user_msg=update.message.text))
     
-    chat_folder = create_chat_folder(effective_chat=update.effective_chat, reset_chat=True)
+    chat_folder = get_chat_folder(effective_chat=update.effective_chat, reset_chat=True)
     
     logger.info('Chat {chat_id} ({chat_name}) - Deleted chat for user {user_id} ({user_name}, {t_username}): "{chat_folder}"'.format(chat_name=chat_name, chat_id=chat_id, user_id=user.id, user_name=human_name, t_username=telegram_username, chat_folder=chat_folder))
     
@@ -470,21 +518,26 @@ def get_registered_chats(context):
     
     registered_chats = []
     for chat_id in chat_dirs:
+        # We read the data from the file and try to update the metadata with the current available
+        chat_data = load_interaction(chat_folder=os.path.join(CURRENT_DIR, CHAT_FOLDER, str(chat_id)))
+        
+        # We now try to retrieve the most recent data
         try:
             chat = context.bot.get_chat(int(chat_id))
-            chat.error = False  # We manually add this field to know that it didn't error
+            chat_data['metadata'] = chat  # We replace the metadata with a (updated) chat instance
+            chat_data['error'] = False  # We manually add this field to know that it didn't error
+            chat_data['error_msg'] = ''
             
         except Exception as e:
-            logger.warning("Can't get chat info for {chat_id}: {err_msg}".format(chat_id=chat_id, err_msg=str(e)))
+            logger.warning("Can't get updated chat info for {chat_id}: {err_msg}".format(chat_id=chat_id, err_msg=str(e)))
             
-            # We fallback to the saved info
-            chat_data = load_interaction(chat_folder=os.path.join(CURRENT_DIR, CHAT_FOLDER, str(chat_id)))
-            
+            # We fallback to the saved info            
             chat = Chat(**chat_data['metadata'])
-            chat.error = True  # We manually add this field to know that it errored
-            chat.error_msg = str(e)
+            chat_data['metadata'] = chat  # We replace the metadata with a (updated) chat instance
+            chat_data['error'] = True  # We manually add this field to know that it didn't error
+            chat_data['error_msg'] = str(e)
         
-        registered_chats.append(chat)
+        registered_chats.append(chat_data)
     
     return registered_chats
 
@@ -509,32 +562,40 @@ def bot_status_handler(update, context):  # Prints the status and current users 
         return  # We return silently
     
     registered_chats = get_registered_chats(context=context)
-    registered_users = [c for c in registered_chats if c.type.upper() == 'PRIVATE']
-    registered_groups = [c for c in registered_chats if c.type.upper() in set(['GROUP', 'SUPERGROUP', 'CHANNEL'])]
+    registered_users = [c for c in registered_chats if c['metadata'].type.upper() == 'PRIVATE']
+    registered_groups = [c for c in registered_chats if c['metadata'].type.upper() in set(['GROUP', 'SUPERGROUP', 'CHANNEL'])]
     
     status_msg = 'Hi {user_name} (@{t_username}, {user_id}).\nSo far {num_user} users and {num_groups} groups have used the bot:\n\nUSERS:'.format(user_id=user.id, user_name=human_name, t_username=telegram_username, num_user=len(registered_users), num_groups=len(registered_groups))
     
-    for registered_user in registered_users:
+    for registered_user_data in registered_users:
+        registered_user = registered_user_data['metadata']
         reg_id = registered_user.id
         reg_human_name = get_human_name(from_user=registered_user)
         reg_t_username = ('@' + registered_user.username) if hasattr(registered_user, 'username') and registered_user.username is not None else None
         
         user_status = '{user_id}: {user_name} ({t_username})'.format(user_id=reg_id, user_name=reg_human_name, t_username=reg_t_username)
-        if registered_user.error:
+        if registered_user_data['error']:
             user_status += ' [ERR]'
+        
+        user_tokens = registered_user_data['total_tokens']
+        user_status += ' Used {:d} tokens ({:.2f}$)'.format(user_tokens, convert_tokens_to_dollars(user_tokens))
         
         status_msg = status_msg + '\n    ' + user_status  # TODO: Add info like last message date or something
     
     status_msg = status_msg + '\n\nGROUPS:'
     
-    for registered_group in registered_groups:
+    for registered_group_data in registered_groups:
+        registered_group = registered_group_data['metadata']
         reg_id = registered_group.id
         reg_title = registered_group.title
         reg_t_username = ('@' + registered_group.username) if hasattr(registered_group, 'username') and registered_group.username is not None else None
         
         group_status = '{group_id}: {group_title} ({t_username})'.format(group_id=reg_id, group_title=reg_title, t_username=reg_t_username)
-        if registered_group.error:
+        if registered_group_data['error']:
             group_status += ' [ERR]'
+        
+        group_tokens = registered_group_data['total_tokens']
+        group_status += ' Used {:d} tokens ({:.2f}$)'.format(group_tokens, convert_tokens_to_dollars(group_tokens))
         
         status_msg = status_msg + '\n    ' + group_status  # TODO: Add info like last message date or something
     
