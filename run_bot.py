@@ -597,6 +597,15 @@ def bot_status_handler(update, context):  # Prints the status and current users 
         group_tokens = registered_group_data['total_tokens']
         group_status += ' Used {:d} tokens ({:.2f}$)'.format(group_tokens, convert_tokens_to_dollars(group_tokens))
         
+        for group_member_id, group_member in registered_group_data['members'].items():
+            group_user_human_name = get_human_name(from_user=group_member['metadata'])
+            group_user_t_username = ('@' + group_member['metadata']['username']) if 'username' in group_member['metadata'] and group_member['metadata']['username'] is not None else None
+            group_user_status = '\n        {user_id}: {user_name} ({t_username})'.format(user_id=group_member_id, user_name=group_user_human_name, t_username=group_user_t_username)
+            
+            group_user_tokens = group_member['total_tokens']
+            group_user_status += ' Used {:d} tokens ({:.2f}$)'.format(group_user_tokens, convert_tokens_to_dollars(group_user_tokens))
+            group_status += group_user_status
+            
         status_msg = status_msg + '\n    ' + group_status  # TODO: Add info like last message date or something
     
     context.bot.send_message(chat_id=chat_id, text=status_msg)
