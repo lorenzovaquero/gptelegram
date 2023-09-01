@@ -23,6 +23,7 @@ from tenacity import retry, stop_after_attempt, wait_random_exponential  # for e
 import subprocess
 import pickle
 import shutil
+import copy
 
 CURRENT_DIR = os.path.dirname(__file__)
 
@@ -263,7 +264,7 @@ def clean_answer(msg_text):
     return answ
 
 
-def assemble_context(chat_data, max_messages=MAX_CONTEXT_MESSAGES):
+def assemble_context(chat_data, max_messages=MAX_CONTEXT_MESSAGES, chatcompletion_format=False):
     messages_list = chat_data['chat']
     
     if len(messages_list) == 0:
@@ -271,31 +272,56 @@ def assemble_context(chat_data, max_messages=MAX_CONTEXT_MESSAGES):
     
     messages_list = messages_list[-max_messages:]  # We limit the length
     
-    context = ""
-    for i, message in enumerate(messages_list):
-        new_msg = '{}: {}'.format(message['user'], message['msg'])
-        
-        if i < len(messages_list) - 1:
-            new_msg = new_msg + '\n\n'
-        
-        context = context + new_msg
+    if chatcompletion_format:
+        context = []
+        for message in messages_list:
+            if message['user'] == DEFAULT_BOT:
+                role = "assistant"
+            else:
+                role = "user"
+            context.append({"role": role, "content": message['msg']})
+    
+    else:
+        context = ""
+        for i, message in enumerate(messages_list):
+            new_msg = '{}: {}'.format(message['user'], message['msg'])
+            
+            if i < len(messages_list) - 1:
+                new_msg = new_msg + '\n\n'
+            
+            context = context + new_msg
     
     return context
 
 
-def assemble_prompt(prompt_text=DEFAULT_PROMPT, human_name=DEFAULT_HUMAN, bot_name=DEFAULT_BOT, context=None):
+def assemble_prompt(prompt_text=DEFAULT_PROMPT, human_name=DEFAULT_HUMAN, bot_name=DEFAULT_BOT, context=None, chatcompletion_format=False):
     prompt = prompt_text.format_map(SafeDict(human=human_name, bot=bot_name))
     
-    if context is not None and len(context) > 0:
-        prompt = prompt + '\n\n{__CONTEXT__}'.format_map(SafeDict(__CONTEXT__=context))
-    
-    prompt = prompt + PROMPT_LINK.format_map(SafeDict(human=human_name, bot=bot_name))
+    if chatcompletion_format:
+        prompt = [{"role": "system", "content": prompt}]
+        if context is not None and len(context) > 0:
+            prompt.extend(context)
+        
+    else:
+        if context is not None and len(context) > 0:
+            prompt = prompt + '\n\n{__CONTEXT__}'.format_map(SafeDict(__CONTEXT__=context))
+        
+        prompt = prompt + PROMPT_LINK.format_map(SafeDict(human=human_name, bot=bot_name))
 
     return prompt
 
 
-def assemble_openai_query(prompt, query, human_name=DEFAULT_HUMAN, bot_name=DEFAULT_BOT):
-    query = prompt.format_map(SafeDict(__MSG__=query))  # TODO: I should escape the other potential braces in the conversation
+def assemble_openai_query(prompt, query, human_name=DEFAULT_HUMAN, bot_name=DEFAULT_BOT, chatcompletion_format=False):
+    if chatcompletion_format:
+        query = [{"role": "user", "content": query}]
+        
+        if prompt is not None and len(prompt) > 0:
+            prompt = copy.deepcopy(prompt)
+            prompt.extend(query)
+            query = prompt
+        
+    else:
+        query = prompt.format_map(SafeDict(__MSG__=query))  # TODO: I should escape the other potential braces in the conversation
     
     return query
 
@@ -335,8 +361,12 @@ def generate_image(prompt_text):
 def completion_with_backoff(**kwargs):
     return openai.Completion.create(**kwargs)
 
+@retry(wait=wait_random_exponential(min=1, max=10), stop=stop_after_attempt(6))
+def chat_with_backoff(**kwargs):
+    return openai.ChatCompletion.create(**kwargs)
 
-def get_openai_answer(msg_text, text_engine=DEFAULT_TEXT_ENGINE, human_name=DEFAULT_HUMAN, bot_name=DEFAULT_BOT, user_id=''):
+
+def get_openai_answer_completion(msg_text, text_engine=DEFAULT_TEXT_ENGINE, human_name=DEFAULT_HUMAN, bot_name=DEFAULT_BOT, user_id='', max_tokens=MAX_OUT_TOKENS):
     start_sequence = "\n{}:".format(bot_name)
     restart_sequence = "\n{}:".format(human_name)
 
@@ -344,7 +374,7 @@ def get_openai_answer(msg_text, text_engine=DEFAULT_TEXT_ENGINE, human_name=DEFA
       engine=text_engine,
       prompt=msg_text,
       temperature=0.9,
-      max_tokens=250,
+      max_tokens=max_tokens,
       top_p=1,
       frequency_penalty=0,
       presence_penalty=0.6,
@@ -356,10 +386,33 @@ def get_openai_answer(msg_text, text_engine=DEFAULT_TEXT_ENGINE, human_name=DEFA
 
     return answ, total_tokens
 
+def get_openai_answer_chat(msg_text, text_engine=DEFAULT_TEXT_ENGINE, human_name=DEFAULT_HUMAN, bot_name=DEFAULT_BOT, user_id='', max_tokens=MAX_OUT_TOKENS):
+    start_sequence = "\n{}:".format(bot_name)
+    restart_sequence = "\n{}:".format(human_name)
 
-def talk_to_openai(message, update, store_conv=False, prompt_text=DEFAULT_PROMPT, human_name=DEFAULT_HUMAN, bot_name=DEFAULT_BOT):
+    response = chat_with_backoff(
+      model="gpt-4",
+      messages=msg_text,
+      temperature=0.9,
+      max_tokens=max_tokens,
+      top_p=1,
+      frequency_penalty=0,
+      presence_penalty=0.6,
+      stop=[restart_sequence, start_sequence],
+      user=str(user_id)
+    )
+    answ = response.choices[0].message
+    answ = answ.content
+    total_tokens = response.usage.total_tokens
+
+    return answ, total_tokens
+
+def talk_to_openai(message, update, store_conv=False, prompt_text=DEFAULT_PROMPT, human_name=DEFAULT_HUMAN, bot_name=DEFAULT_BOT, chatcompletion_format=True):
     user = update.message.from_user
     chat_id = update.effective_chat.id
+    
+    # If is admin, we will allow more tokens
+    is_admin = check_admin_allowed(whitelist=CHAT_WHITELIST, update=update)
     
     # We create (or get) file with chat_id conversation
     chat_folder = get_chat_folder(effective_chat=update.effective_chat)
@@ -371,17 +424,22 @@ def talk_to_openai(message, update, store_conv=False, prompt_text=DEFAULT_PROMPT
         # Store question in file
         save_interaction(chat_folder=chat_folder, user_name=human_name, msg_text=message)
         
-        context_txt = assemble_context(chat_data=conv_context_data)
+        context_txt = assemble_context(chat_data=conv_context_data, chatcompletion_format=chatcompletion_format)
     
     else:
         context_txt = None
     
     prompt = assemble_prompt(prompt_text=prompt_text, human_name=human_name,
-	                         bot_name=bot_name, context=context_txt)
+	                         bot_name=bot_name, context=context_txt,
+	                         chatcompletion_format=chatcompletion_format)
 	
-    openai_query = assemble_openai_query(prompt=prompt, query=message)
+    openai_query = assemble_openai_query(prompt=prompt, query=message, chatcompletion_format=chatcompletion_format)
     
-    answ, total_tokens = get_openai_answer(openai_query, human_name=human_name, bot_name=bot_name, user_id=update.message.from_user.id)
+    num_chars = [len(q['content']) for q in openai_query]
+    max_tokens = int(8192 - sum(num_chars) / 3.5) if is_admin else MAX_OUT_TOKENS
+    
+    answ, total_tokens = get_openai_answer_chat(openai_query, human_name=human_name, bot_name=bot_name, user_id=update.message.from_user.id,
+	                                            max_tokens=max_tokens)
     
     answ = clean_answer(answ)
     
